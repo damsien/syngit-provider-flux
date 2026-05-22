@@ -1,0 +1,86 @@
+package fluxprovider
+
+import (
+	"encoding/json"
+	"fmt"
+	"time"
+
+	helmv2 "github.com/fluxcd/helm-controller/api/v2"
+	helmprovider "github.com/syngit-org/syngit-provider-helm/pkg"
+	corev1 "k8s.io/api/core/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/yaml"
+)
+
+// DefaultInterval is the reconciliation interval applied to the generated HelmRelease.
+const DefaultInterval = 10 * time.Minute
+
+// ConvertToHelmRelease decodes a Helm release secret with the helm provider's
+// ExtractRelease and produces a Flux v2 HelmRelease custom resource. The
+// release name, namespace, chart name/version, and user-supplied values are
+// derived from the secret. The chart sourceRef is not stored in the Helm release
+// secret and must be supplied by the caller.
+func ConvertToHelmRelease(secret *corev1.Secret, sourceRef helmv2.CrossNamespaceObjectReference) (*FluxHelmRelease, error) {
+	rel, err := helmprovider.ExtractRelease(secret)
+	if err != nil {
+		return nil, fmt.Errorf("failed to extract release from helm secret: %w", err)
+	}
+
+	chartSpec := helmv2.HelmChartTemplateSpec{SourceRef: sourceRef}
+	if rel.Chart != nil && rel.Chart.Metadata != nil {
+		chartSpec.Chart = rel.Chart.Metadata.Name
+		chartSpec.Version = rel.Chart.Metadata.Version
+	}
+
+	rawValues, err := marshalValues(rel.Config)
+	if err != nil {
+		return nil, err
+	}
+
+	hr := &helmv2.HelmRelease{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: helmv2.GroupVersion.String(),
+			Kind:       helmv2.HelmReleaseKind,
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      rel.Name,
+			Namespace: rel.Namespace,
+		},
+		Spec: helmv2.HelmReleaseSpec{
+			Interval:        metav1.Duration{Duration: DefaultInterval},
+			ReleaseName:     rel.Name,
+			TargetNamespace: rel.Namespace,
+			Chart: &helmv2.HelmChartTemplate{
+				Spec: chartSpec,
+			},
+			Values: rawValues,
+		},
+	}
+
+	rawYAML, err := yaml.Marshal(hr)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal HelmRelease to YAML: %w", err)
+	}
+
+	rawYAMLWithHeader := string(rawYAML)
+
+	return &FluxHelmRelease{
+		HelmRelease: hr,
+		RawYAML:     rawYAMLWithHeader,
+	}, nil
+}
+
+// marshalValues converts the structured values map into the apiextensionsv1.JSON
+// wrapper used by HelmReleaseSpec.Values. Returns nil for empty input so the
+// field is omitted from the serialized HelmRelease.
+func marshalValues(values map[string]interface{}) (*apiextensionsv1.JSON, error) {
+	if len(values) == 0 {
+		return nil, nil
+	}
+	raw, err := json.Marshal(values)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal values to JSON: %w", err)
+	}
+	return &apiextensionsv1.JSON{Raw: raw}, nil
+}
