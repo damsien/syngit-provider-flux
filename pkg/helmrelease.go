@@ -3,6 +3,7 @@ package fluxprovider
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	helmv2 "github.com/fluxcd/helm-controller/api/v2"
@@ -10,6 +11,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"sigs.k8s.io/yaml"
 )
 
@@ -83,4 +85,45 @@ func marshalValues(values map[string]interface{}) (*apiextensionsv1.JSON, error)
 		return nil, fmt.Errorf("failed to marshal values to JSON: %w", err)
 	}
 	return &apiextensionsv1.JSON{Raw: raw}, nil
+}
+
+const (
+	fluxHelmGroup   = "helm.toolkit.fluxcd.io"
+	helmReleaseKind = "HelmRelease"
+)
+
+// IsCorrectHelmRelease reports whether the object is a Flux HelmRelease whose name
+// (and namespace, when the manifest declares one) matches the given ones.
+func IsCorrectHelmRelease(object map[string]interface{}, name, namespace string) bool {
+	apiVersion, _ := object["apiVersion"].(string)
+	kind, _ := object["kind"].(string)
+	if kind != helmReleaseKind || !strings.HasPrefix(apiVersion, fluxHelmGroup+"/") {
+		return false
+	}
+	md, _ := object["metadata"].(map[string]interface{})
+	n, _ := md["name"].(string)
+	ns, _ := md["namespace"].(string)
+	if n != name {
+		return false
+	}
+	return (ns == "" && namespace == "") || ns == namespace
+}
+
+// ExtractSourceRefFromHelmRelease reads spec.chart.spec.sourceRef from a HelmRelease object
+// (decoded as a generic map) into a CrossNamespaceObjectReference. The boolean
+// is false when the sourceRef is absent or has no name.
+func ExtractSourceRefFromHelmRelease(obj map[string]interface{}) (helmv2.CrossNamespaceObjectReference, bool) {
+	sr, found, err := unstructured.NestedMap(obj, "spec", "chart", "spec", "sourceRef")
+	if err != nil || !found {
+		return helmv2.CrossNamespaceObjectReference{}, false
+	}
+	ref := helmv2.CrossNamespaceObjectReference{}
+	ref.APIVersion, _ = sr["apiVersion"].(string)
+	ref.Kind, _ = sr["kind"].(string)
+	ref.Name, _ = sr["name"].(string)
+	ref.Namespace, _ = sr["namespace"].(string)
+	if ref.Name == "" {
+		return helmv2.CrossNamespaceObjectReference{}, false
+	}
+	return ref, true
 }

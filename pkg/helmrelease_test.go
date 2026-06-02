@@ -225,3 +225,251 @@ func TestConvertToHelmRelease_RejectsNonHelmSecret(t *testing.T) {
 		t.Fatal("ConvertToHelmRelease() should return error for non-helm secret")
 	}
 }
+
+func TestIsCorrectHelmRelease(t *testing.T) {
+	tests := []struct {
+		name      string
+		object    map[string]interface{}
+		matchName string
+		matchNS   string
+		want      bool
+	}{
+		{
+			name: "name and namespace match",
+			object: map[string]interface{}{
+				"apiVersion": fluxHelmGroup + "/v2",
+				"kind":       helmReleaseKind,
+				"metadata": map[string]interface{}{
+					"name":      "myapp",
+					"namespace": "production",
+				},
+			},
+			matchName: "myapp",
+			matchNS:   "production",
+			want:      true,
+		},
+		{
+			name: "name matches, manifest has no namespace",
+			object: map[string]interface{}{
+				"apiVersion": fluxHelmGroup + "/v2",
+				"kind":       helmReleaseKind,
+				"metadata": map[string]interface{}{
+					"name": "myapp",
+				},
+			},
+			matchName: "myapp",
+			matchNS:   "production",
+			want:      false,
+		},
+		{
+			name: "name matches, caller passes empty namespace",
+			object: map[string]interface{}{
+				"apiVersion": fluxHelmGroup + "/v2beta1",
+				"kind":       helmReleaseKind,
+				"metadata": map[string]interface{}{
+					"name":      "myapp",
+					"namespace": "production",
+				},
+			},
+			matchName: "myapp",
+			matchNS:   "",
+			want:      false,
+		},
+		{
+			name: "name matches, both have empty namespaces",
+			object: map[string]interface{}{
+				"apiVersion": fluxHelmGroup + "/v2beta1",
+				"kind":       helmReleaseKind,
+				"metadata": map[string]interface{}{
+					"name": "myapp",
+				},
+			},
+			matchName: "myapp",
+			matchNS:   "",
+			want:      true,
+		},
+		{
+			name: "namespace mismatch",
+			object: map[string]interface{}{
+				"apiVersion": fluxHelmGroup + "/v2",
+				"kind":       helmReleaseKind,
+				"metadata": map[string]interface{}{
+					"name":      "myapp",
+					"namespace": "staging",
+				},
+			},
+			matchName: "myapp",
+			matchNS:   "production",
+			want:      false,
+		},
+		{
+			name: "name mismatch",
+			object: map[string]interface{}{
+				"apiVersion": fluxHelmGroup + "/v2",
+				"kind":       helmReleaseKind,
+				"metadata": map[string]interface{}{
+					"name":      "otherapp",
+					"namespace": "production",
+				},
+			},
+			matchName: "myapp",
+			matchNS:   "production",
+			want:      false,
+		},
+		{
+			name: "wrong kind",
+			object: map[string]interface{}{
+				"apiVersion": fluxHelmGroup + "/v2",
+				"kind":       "Kustomization",
+				"metadata": map[string]interface{}{
+					"name": "myapp",
+				},
+			},
+			matchName: "myapp",
+			matchNS:   "production",
+			want:      false,
+		},
+		{
+			name: "wrong api group",
+			object: map[string]interface{}{
+				"apiVersion": "kustomize.toolkit.fluxcd.io/v1",
+				"kind":       helmReleaseKind,
+				"metadata": map[string]interface{}{
+					"name": "myapp",
+				},
+			},
+			matchName: "myapp",
+			matchNS:   "production",
+			want:      false,
+		},
+		{
+			name: "group as exact apiVersion without version suffix",
+			object: map[string]interface{}{
+				"apiVersion": fluxHelmGroup,
+				"kind":       helmReleaseKind,
+				"metadata": map[string]interface{}{
+					"name": "myapp",
+				},
+			},
+			matchName: "myapp",
+			matchNS:   "production",
+			want:      false,
+		},
+		{
+			name:      "missing metadata",
+			object:    map[string]interface{}{"apiVersion": fluxHelmGroup + "/v2", "kind": helmReleaseKind},
+			matchName: "myapp",
+			matchNS:   "production",
+			want:      false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := IsCorrectHelmRelease(tt.object, tt.matchName, tt.matchNS); got != tt.want {
+				t.Errorf("IsCorrectHelmRelease() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestSourceRefFromHelmRelease(t *testing.T) {
+	helmReleaseWithSourceRef := func(sourceRef map[string]interface{}) map[string]interface{} {
+		return map[string]interface{}{
+			"spec": map[string]interface{}{
+				"chart": map[string]interface{}{
+					"spec": map[string]interface{}{
+						"sourceRef": sourceRef,
+					},
+				},
+			},
+		}
+	}
+
+	t.Run("full sourceRef", func(t *testing.T) {
+		obj := helmReleaseWithSourceRef(map[string]interface{}{
+			"apiVersion": "source.toolkit.fluxcd.io/v1",
+			"kind":       "HelmRepository",
+			"name":       "myrepo",
+			"namespace":  "flux-system",
+		})
+
+		ref, ok := ExtractSourceRefFromHelmRelease(obj)
+		if !ok {
+			t.Fatal("SourceRefFromHelmRelease() ok = false, want true")
+		}
+		if ref.APIVersion != "source.toolkit.fluxcd.io/v1" {
+			t.Errorf("apiVersion = %q, want %q", ref.APIVersion, "source.toolkit.fluxcd.io/v1")
+		}
+		if ref.Kind != "HelmRepository" {
+			t.Errorf("kind = %q, want %q", ref.Kind, "HelmRepository")
+		}
+		if ref.Name != "myrepo" {
+			t.Errorf("name = %q, want %q", ref.Name, "myrepo")
+		}
+		if ref.Namespace != "flux-system" {
+			t.Errorf("namespace = %q, want %q", ref.Namespace, "flux-system")
+		}
+	})
+
+	t.Run("name only", func(t *testing.T) {
+		obj := helmReleaseWithSourceRef(map[string]interface{}{"name": "myrepo"})
+
+		ref, ok := ExtractSourceRefFromHelmRelease(obj)
+		if !ok {
+			t.Fatal("SourceRefFromHelmRelease() ok = false, want true")
+		}
+		if ref.Name != "myrepo" {
+			t.Errorf("name = %q, want %q", ref.Name, "myrepo")
+		}
+		if ref.Kind != "" || ref.APIVersion != "" || ref.Namespace != "" {
+			t.Errorf("expected only name to be set, got %+v", ref)
+		}
+	})
+
+	t.Run("sourceRef without name", func(t *testing.T) {
+		obj := helmReleaseWithSourceRef(map[string]interface{}{
+			"kind": "HelmRepository",
+		})
+
+		if _, ok := ExtractSourceRefFromHelmRelease(obj); ok {
+			t.Error("SourceRefFromHelmRelease() ok = true, want false when name absent")
+		}
+	})
+
+	t.Run("sourceRef absent", func(t *testing.T) {
+		obj := map[string]interface{}{
+			"spec": map[string]interface{}{
+				"chart": map[string]interface{}{
+					"spec": map[string]interface{}{},
+				},
+			},
+		}
+
+		if _, ok := ExtractSourceRefFromHelmRelease(obj); ok {
+			t.Error("SourceRefFromHelmRelease() ok = true, want false when sourceRef absent")
+		}
+	})
+
+	t.Run("empty object", func(t *testing.T) {
+		if _, ok := ExtractSourceRefFromHelmRelease(map[string]interface{}{}); ok {
+			t.Error("SourceRefFromHelmRelease() ok = true, want false for empty object")
+		}
+	})
+
+	t.Run("malformed sourceRef is not a map", func(t *testing.T) {
+		obj := map[string]interface{}{
+			"spec": map[string]interface{}{
+				"chart": map[string]interface{}{
+					"spec": map[string]interface{}{
+						"sourceRef": "not-a-map",
+					},
+				},
+			},
+		}
+
+		if _, ok := ExtractSourceRefFromHelmRelease(obj); ok {
+			t.Error("SourceRefFromHelmRelease() ok = true, want false for malformed sourceRef")
+		}
+	})
+}
