@@ -73,6 +73,41 @@ func ConvertToHelmRelease(secret *corev1.Secret, sourceRef helmv2.CrossNamespace
 	}, nil
 }
 
+// ConvertToHelmReleaseWithExisting decodes a Helm release secret and produces a
+// Flux v2 HelmRelease that is a copy of the supplied existing HelmRelease with
+// only spec.values replaced by the secret's user-supplied values. Every other
+// field (chart, sourceRef, interval, install/upgrade options, metadata, ...) is
+// preserved exactly. An empty/absent config in the secret clears spec.values.
+// The input is not mutated.
+func ConvertToHelmReleaseWithExisting(secret *corev1.Secret, existing *helmv2.HelmRelease) (*FluxHelmRelease, error) {
+	if existing == nil {
+		return nil, fmt.Errorf("existing HelmRelease must not be nil")
+	}
+
+	rel, err := helmprovider.ExtractRelease(secret)
+	if err != nil {
+		return nil, fmt.Errorf("failed to extract release from helm secret: %w", err)
+	}
+
+	rawValues, err := marshalValues(rel.Config)
+	if err != nil {
+		return nil, err
+	}
+
+	hr := existing.DeepCopy()
+	hr.Spec.Values = rawValues
+
+	rawYAML, err := yaml.Marshal(hr)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal HelmRelease to YAML: %w", err)
+	}
+
+	return &FluxHelmRelease{
+		HelmRelease: hr,
+		RawYAML:     string(rawYAML),
+	}, nil
+}
+
 // marshalValues converts the structured values map into the apiextensionsv1.JSON
 // wrapper used by HelmReleaseSpec.Values. Returns nil for empty input so the
 // field is omitted from the serialized HelmRelease.
