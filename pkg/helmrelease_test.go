@@ -5,10 +5,13 @@ import (
 	"compress/gzip"
 	"encoding/base64"
 	"encoding/json"
+	"reflect"
 	"testing"
+	"time"
 
 	helmv2 "github.com/fluxcd/helm-controller/api/v2"
 	corev1 "k8s.io/api/core/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/yaml"
 )
@@ -223,6 +226,166 @@ func TestConvertToHelmRelease_RejectsNonHelmSecret(t *testing.T) {
 	}
 	if _, err := ConvertToHelmRelease(secret, defaultSourceRef()); err == nil {
 		t.Fatal("ConvertToHelmRelease() should return error for non-helm secret")
+	}
+}
+
+func jsonValues(t *testing.T, m map[string]interface{}) *apiextensionsv1.JSON {
+	t.Helper()
+	raw, err := json.Marshal(m)
+	if err != nil {
+		t.Fatalf("failed to marshal values: %v", err)
+	}
+	return &apiextensionsv1.JSON{Raw: raw}
+}
+
+// existingHelmRelease builds a HelmRelease with hand-tuned, non-default spec
+// fields so tests can assert that ConvertToHelmReleaseWithExisting preserves
+// everything except spec.values.
+func existingHelmRelease(values *apiextensionsv1.JSON) *helmv2.HelmRelease {
+	return &helmv2.HelmRelease{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: helmv2.GroupVersion.String(),
+			Kind:       helmv2.HelmReleaseKind,
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "existing-app",
+			Namespace: "existing-ns",
+		},
+		Spec: helmv2.HelmReleaseSpec{
+			Interval:        metav1.Duration{Duration: 30 * time.Minute},
+			ReleaseName:     "existing-app",
+			TargetNamespace: "existing-ns",
+			Chart: &helmv2.HelmChartTemplate{
+				Spec: helmv2.HelmChartTemplateSpec{
+					Chart:   "existing-chart",
+					Version: "9.9.9",
+					SourceRef: helmv2.CrossNamespaceObjectReference{
+						Kind:      "GitRepository",
+						Name:      "existing-repo",
+						Namespace: "existing-flux",
+					},
+				},
+			},
+			Values: values,
+		},
+	}
+}
+
+func TestConvertToHelmReleaseWithExisting_ReplacesValuesOnly(t *testing.T) {
+	existing := existingHelmRelease(jsonValues(t, map[string]interface{}{"old": "value"}))
+
+	newConfig := map[string]interface{}{
+		"replicaCount": float64(5),
+		"image":        map[string]interface{}{"repository": "redis", "tag": "7.0"},
+	}
+	// Secret name/namespace/chart deliberately differ from existing to prove
+	// they are ignored — only the values are taken from the secret.
+	secret := validHelmSecret(t, "secret-app", "secret-ns", "secret-chart", "0.0.1", newConfig)
+
+	result, err := ConvertToHelmReleaseWithExisting(secret, existing)
+	if err != nil {
+		t.Fatalf("ConvertToHelmReleaseWithExisting() error = %v", err)
+	}
+	hr := result.HelmRelease
+
+	// Values come from the secret and fully replace the old ones.
+	if hr.Spec.Values == nil {
+		t.Fatal("spec.values is nil")
+	}
+	var got map[string]interface{}
+	if err := json.Unmarshal(hr.Spec.Values.Raw, &got); err != nil {
+		t.Fatalf("spec.values.Raw is not valid JSON: %v", err)
+	}
+	if got["replicaCount"] != float64(5) {
+		t.Errorf("spec.values.replicaCount = %v, want 5", got["replicaCount"])
+	}
+	if _, ok := got["old"]; ok {
+		t.Errorf("spec.values still contains old key: %v", got)
+	}
+
+	// Everything else is preserved from the existing HelmRelease.
+	if hr.Name != "existing-app" {
+		t.Errorf("metadata.name = %q, want %q", hr.Name, "existing-app")
+	}
+	if hr.Namespace != "existing-ns" {
+		t.Errorf("metadata.namespace = %q, want %q", hr.Namespace, "existing-ns")
+	}
+	if hr.Spec.ReleaseName != "existing-app" {
+		t.Errorf("spec.releaseName = %q, want %q", hr.Spec.ReleaseName, "existing-app")
+	}
+	if hr.Spec.TargetNamespace != "existing-ns" {
+		t.Errorf("spec.targetNamespace = %q, want %q", hr.Spec.TargetNamespace, "existing-ns")
+	}
+	if hr.Spec.Interval.Duration != 30*time.Minute {
+		t.Errorf("spec.interval = %s, want %s", hr.Spec.Interval.Duration, 30*time.Minute)
+	}
+	if hr.Spec.Chart.Spec.Chart != "existing-chart" {
+		t.Errorf("spec.chart.spec.chart = %q, want %q", hr.Spec.Chart.Spec.Chart, "existing-chart")
+	}
+	if hr.Spec.Chart.Spec.Version != "9.9.9" {
+		t.Errorf("spec.chart.spec.version = %q, want %q", hr.Spec.Chart.Spec.Version, "9.9.9")
+	}
+	if hr.Spec.Chart.Spec.SourceRef.Kind != "GitRepository" {
+		t.Errorf("spec.chart.spec.sourceRef.kind = %q, want %q", hr.Spec.Chart.Spec.SourceRef.Kind, "GitRepository")
+	}
+	if hr.Spec.Chart.Spec.SourceRef.Name != "existing-repo" {
+		t.Errorf("spec.chart.spec.sourceRef.name = %q, want %q", hr.Spec.Chart.Spec.SourceRef.Name, "existing-repo")
+	}
+
+	// The YAML body must round-trip back into a HelmRelease.
+	var roundTrip helmv2.HelmRelease
+	if err := yaml.Unmarshal([]byte(result.RawYAML), &roundTrip); err != nil {
+		t.Fatalf("RawYAML did not parse: %v", err)
+	}
+	if roundTrip.Spec.Chart.Spec.Chart != "existing-chart" {
+		t.Errorf("round-tripped chart = %q, want %q", roundTrip.Spec.Chart.Spec.Chart, "existing-chart")
+	}
+}
+
+func TestConvertToHelmReleaseWithExisting_DoesNotMutateInput(t *testing.T) {
+	existing := existingHelmRelease(jsonValues(t, map[string]interface{}{"old": "value"}))
+	before := existing.DeepCopy()
+
+	secret := validHelmSecret(t, "secret-app", "secret-ns", "secret-chart", "0.0.1",
+		map[string]interface{}{"new": "value"})
+
+	if _, err := ConvertToHelmReleaseWithExisting(secret, existing); err != nil {
+		t.Fatalf("ConvertToHelmReleaseWithExisting() error = %v", err)
+	}
+
+	if !reflect.DeepEqual(existing, before) {
+		t.Errorf("input HelmRelease was mutated:\n before = %+v\n after  = %+v", before, existing)
+	}
+}
+
+func TestConvertToHelmReleaseWithExisting_EmptyValuesClears(t *testing.T) {
+	existing := existingHelmRelease(jsonValues(t, map[string]interface{}{"old": "value"}))
+	secret := validHelmSecret(t, "secret-app", "secret-ns", "secret-chart", "0.0.1", nil)
+
+	result, err := ConvertToHelmReleaseWithExisting(secret, existing)
+	if err != nil {
+		t.Fatalf("ConvertToHelmReleaseWithExisting() error = %v", err)
+	}
+	if result.HelmRelease.Spec.Values != nil {
+		t.Errorf("spec.values should be nil for empty config, got %s", string(result.HelmRelease.Spec.Values.Raw))
+	}
+}
+
+func TestConvertToHelmReleaseWithExisting_NilExisting(t *testing.T) {
+	secret := validHelmSecret(t, "secret-app", "secret-ns", "secret-chart", "0.0.1", nil)
+	if _, err := ConvertToHelmReleaseWithExisting(secret, nil); err == nil {
+		t.Fatal("ConvertToHelmReleaseWithExisting() should return error for nil existing")
+	}
+}
+
+func TestConvertToHelmReleaseWithExisting_RejectsNonHelmSecret(t *testing.T) {
+	existing := existingHelmRelease(nil)
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "not-a-helm-secret"},
+		Type:       corev1.SecretTypeOpaque,
+	}
+	if _, err := ConvertToHelmReleaseWithExisting(secret, existing); err == nil {
+		t.Fatal("ConvertToHelmReleaseWithExisting() should return error for non-helm secret")
 	}
 }
 
