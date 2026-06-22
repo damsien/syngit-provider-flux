@@ -75,10 +75,11 @@ func ConvertToHelmRelease(secret *corev1.Secret, sourceRef helmv2.CrossNamespace
 
 // ConvertToHelmReleaseWithExisting decodes a Helm release secret and produces a
 // Flux v2 HelmRelease that is a copy of the supplied existing HelmRelease with
-// only spec.values replaced by the secret's user-supplied values. Every other
-// field (chart, sourceRef, interval, install/upgrade options, metadata, ...) is
-// preserved exactly. An empty/absent config in the secret clears spec.values.
-// The input is not mutated.
+// spec.values replaced by the secret's user-supplied values and
+// spec.chart.spec.version updated when the secret's release pins a different
+// chart version. Every other field (chart name, sourceRef, interval,
+// install/upgrade options, metadata, ...) is preserved exactly. An empty/absent
+// config in the secret clears spec.values. The input is not mutated.
 func ConvertToHelmReleaseWithExisting(secret *corev1.Secret, existing *helmv2.HelmRelease) (*FluxHelmRelease, error) {
 	if existing == nil {
 		return nil, fmt.Errorf("existing HelmRelease must not be nil")
@@ -96,6 +97,14 @@ func ConvertToHelmReleaseWithExisting(secret *corev1.Secret, existing *helmv2.He
 
 	hr := existing.DeepCopy()
 	hr.Spec.Values = rawValues
+
+	// Update the chart version when the secret's release pins a different
+	// version than the existing HelmRelease. Every other chart field is left
+	// untouched.
+	if rel.Chart != nil && rel.Chart.Metadata != nil && rel.Chart.Metadata.Version != "" &&
+		hr.Spec.Chart != nil && hr.Spec.Chart.Spec.Version != rel.Chart.Metadata.Version {
+		hr.Spec.Chart.Spec.Version = rel.Chart.Metadata.Version
+	}
 
 	rawYAML, err := yaml.Marshal(hr)
 	if err != nil {

@@ -278,8 +278,9 @@ func TestConvertToHelmReleaseWithExisting_ReplacesValuesOnly(t *testing.T) {
 		"replicaCount": float64(5),
 		"image":        map[string]interface{}{"repository": "redis", "tag": "7.0"},
 	}
-	// Secret name/namespace/chart deliberately differ from existing to prove
-	// they are ignored — only the values are taken from the secret.
+	// Secret name/namespace/chart name deliberately differ from existing to
+	// prove they are ignored — only the values and chart version are taken
+	// from the secret.
 	secret := validHelmSecret(t, "secret-app", "secret-ns", "secret-chart", "0.0.1", newConfig)
 
 	result, err := ConvertToHelmReleaseWithExisting(secret, existing)
@@ -322,8 +323,9 @@ func TestConvertToHelmReleaseWithExisting_ReplacesValuesOnly(t *testing.T) {
 	if hr.Spec.Chart.Spec.Chart != "existing-chart" {
 		t.Errorf("spec.chart.spec.chart = %q, want %q", hr.Spec.Chart.Spec.Chart, "existing-chart")
 	}
-	if hr.Spec.Chart.Spec.Version != "9.9.9" {
-		t.Errorf("spec.chart.spec.version = %q, want %q", hr.Spec.Chart.Spec.Version, "9.9.9")
+	// The chart version is updated to match the secret's release.
+	if hr.Spec.Chart.Spec.Version != "0.0.1" {
+		t.Errorf("spec.chart.spec.version = %q, want %q", hr.Spec.Chart.Spec.Version, "0.0.1")
 	}
 	if hr.Spec.Chart.Spec.SourceRef.Kind != "GitRepository" {
 		t.Errorf("spec.chart.spec.sourceRef.kind = %q, want %q", hr.Spec.Chart.Spec.SourceRef.Kind, "GitRepository")
@@ -339,6 +341,25 @@ func TestConvertToHelmReleaseWithExisting_ReplacesValuesOnly(t *testing.T) {
 	}
 	if roundTrip.Spec.Chart.Spec.Chart != "existing-chart" {
 		t.Errorf("round-tripped chart = %q, want %q", roundTrip.Spec.Chart.Spec.Chart, "existing-chart")
+	}
+}
+
+func TestConvertToHelmReleaseWithExisting_UpdatesChartVersion(t *testing.T) {
+	// existingHelmRelease pins version "9.9.9"; the secret pins "1.2.3".
+	existing := existingHelmRelease(jsonValues(t, map[string]interface{}{"old": "value"}))
+	secret := validHelmSecret(t, "secret-app", "secret-ns", "secret-chart", "1.2.3", nil)
+
+	result, err := ConvertToHelmReleaseWithExisting(secret, existing)
+	if err != nil {
+		t.Fatalf("ConvertToHelmReleaseWithExisting() error = %v", err)
+	}
+
+	if got := result.HelmRelease.Spec.Chart.Spec.Version; got != "1.2.3" {
+		t.Errorf("spec.chart.spec.version = %q, want %q", got, "1.2.3")
+	}
+	// Chart name and sourceRef are still preserved from the existing release.
+	if got := result.HelmRelease.Spec.Chart.Spec.Chart; got != "existing-chart" {
+		t.Errorf("spec.chart.spec.chart = %q, want %q", got, "existing-chart")
 	}
 }
 
