@@ -10,3 +10,5 @@ type FluxHelmRelease struct {
 	// syngit resource-finder comment header.
 	RawYAML string
 }
+
+const HelmReleaseAnnotation = "flux.syngit.io/helm-release"
