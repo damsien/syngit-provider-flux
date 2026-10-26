@@ -259,7 +259,7 @@ func existingHelmRelease(values *apiextensionsv1.JSON) *helmv2.HelmRelease {
 				Spec: helmv2.HelmChartTemplateSpec{
 					Chart:   "existing-chart",
 					Version: "9.9.9",
-					SourceRef: helmv2.CrossNamespaceObjectReference{
+					SourceRef: &helmv2.CrossNamespaceObjectReference{
 						Kind:      "GitRepository",
 						Name:      "existing-repo",
 						Namespace: "existing-flux",

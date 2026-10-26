@@ -29,7 +29,7 @@ func ConvertToHelmRelease(secret *corev1.Secret, sourceRef helmv2.CrossNamespace
 		return nil, fmt.Errorf("failed to extract release from helm secret: %w", err)
 	}
 
-	chartSpec := helmv2.HelmChartTemplateSpec{SourceRef: sourceRef}
+	chartSpec := helmv2.HelmChartTemplateSpec{SourceRef: &sourceRef}
 	if rel.Chart != nil && rel.Chart.Metadata != nil {
 		chartSpec.Chart = rel.Chart.Metadata.Name
 		chartSpec.Version = rel.Chart.Metadata.Version
